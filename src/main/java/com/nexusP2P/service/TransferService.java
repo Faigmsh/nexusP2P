@@ -24,6 +24,8 @@ public class TransferService {
      */
     public void makeTransfer(String senderAccountNumber, String receiverAccountNumber, BigDecimal amount) {
         Connection connection = null;
+        Account senderAccount = null;
+        Account receiverAccount = null;
         try {
             connection = DBConnection.getConnection();
 
@@ -34,8 +36,8 @@ public class TransferService {
 
             // 2. HESABLARI BAZADAN KİLİDLƏYƏRƏK SEÇMƏK (Row-level Locking):
             // 'FOR UPDATE' sayəsində thread-lər bir-birini gözləyir (Race condition qarşısı alınır).
-            Account senderAccount = accountRepository.findByAccountNumberWithLock(connection, senderAccountNumber);
-            Account receiverAccount = accountRepository.findByAccountNumberWithLock(connection, receiverAccountNumber);
+             senderAccount = accountRepository.findByAccountNumberWithLock(connection, senderAccountNumber);
+             receiverAccount = accountRepository.findByAccountNumberWithLock(connection, receiverAccountNumber);
 
             // 3. VALİDASİYA VƏ BİZNES YOXLAMALARI
             if (senderAccount == null) {
@@ -68,7 +70,7 @@ public class TransferService {
                     receiverAccount.getId(),
                     amount,
                     BigDecimal.ZERO, // Hələlik komissiya 0.0
-                    "DIRECT_TRANSFER"
+                    "SUCCESS_TRANSFER"
             );
 
             // 8. TRANZAKSİYANIN SONLANDIRILMASI (COMMIT):
@@ -76,20 +78,41 @@ public class TransferService {
             connection.commit();
             logger.log(Level.INFO, "Transfer ugurla tamamlandi: " + amount + " " + senderAccount.getCurrency());
 
-        } catch (Exception e) {
+        } catch (InsufficientBalanceException e) {
             // 9. XƏTA BAŞ VERƏNDƏ GERİ ALMAQ (ROLLBACK):
-            if (connection != null) {
+            if (connection != null&&senderAccount!=null&&receiverAccount!=null) {
                 try {
-                    logger.log(Level.WARNING, "Tranzaksiyada xeta bas verdi, deyisiklikler geri alinir. Səbəb: " + e.getMessage());
+//                    logger.log(Level.WARNING, "Tranzaksiyada xeta bas verdi, deyisiklikler geri alinir. Səbəb: " + e.getMessage());
                     connection.rollback();
+                    // Yeni təmiz bir tarixçə yazısı açırıq (Eyni tranzaksiya daxilində)
+                    transactionRepository.saveTransaction(
+                            connection,
+                            senderAccount.getId(),
+                            receiverAccount.getId(),
+                            amount,
+                            BigDecimal.ZERO,
+                            "FAILED_INSUFFICIENT_BALANCE"
+                    );
+                    connection.commit();
                 } catch (SQLException sqlException) {
-                    logger.log(Level.SEVERE, "Rollback edilerken kritik sql xetasi !", sqlException);
+                    logger.log(Level.SEVERE, "Uğursuz transfer loqu yazılarkən SQL xətası! !", sqlException);
                 }
             }
             // Multi-threading testinin çökməməsi, loqları rahat oxuya bilməyimiz üçün xətanı konsola sadə şəkildə çıxarırıq
             System.out.println("[" + Thread.currentThread().getName() + "] FAILED: Xəta: " + e.getMessage());
 
-        } finally {
+        }catch (Exception exception){
+            if (connection != null) {
+                try {
+                    logger.log(Level.WARNING, "Tranzaksiyada xeta bas verdi, deyisiklikler geri alinir. Səbəb: " + exception.getMessage());
+                    connection.rollback();
+                } catch (SQLException sqlException) {
+                    logger.log(Level.SEVERE, "Rollback edilerken kritik sql xetasi !", sqlException);
+                }
+            }
+            System.out.println("[" + Thread.currentThread().getName() + "] FAILED: Xəta: " + exception.getMessage());
+        }
+        finally {
             // 10. BAĞLANTI AYARLARINI BƏRPA ETMƏK VƏ BAĞLANTINI QAPATMAQ:
             if (connection != null) {
                 try {
